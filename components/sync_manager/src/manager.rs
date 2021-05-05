@@ -5,7 +5,7 @@
 use crate::error::*;
 use crate::msg_types::{DeviceType, ServiceStatus, SyncParams, SyncReason, SyncResult};
 use crate::{reset, reset_all, wipe};
-use logins::PasswordStore;
+use logins::LoginStore;
 use places::{
     bookmark_sync::engine::BookmarksEngine, history_sync::engine::HistoryEngine, PlacesApi,
 };
@@ -40,7 +40,7 @@ const DEVICE_TYPE_TV: i32 = DeviceType::Tv as i32;
 pub struct SyncManager {
     mem_cached_state: Option<MemoryCachedState>,
     places: Weak<PlacesApi>,
-    logins: Weak<Mutex<PasswordStore>>,
+    logins: Weak<Mutex<LoginStore>>,
     tabs: Weak<Mutex<TabsStore>>,
 }
 
@@ -64,7 +64,7 @@ impl SyncManager {
         self.places = Arc::downgrade(&places);
     }
 
-    pub fn set_logins(&mut self, logins: Arc<Mutex<PasswordStore>>) {
+    pub fn set_logins(&mut self, logins: Arc<Mutex<LoginStore>>) {
         self.logins = Arc::downgrade(&logins);
     }
 

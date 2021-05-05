@@ -8,7 +8,7 @@ use crate::login::{LocalLogin, Login, MirrorLogin, SyncLoginData, SyncStatus};
 use crate::schema;
 use crate::update_plan::UpdatePlan;
 use crate::LoginDb;
-use crate::PasswordStore;
+use crate::LoginStore;
 use rusqlite::NO_PARAMS;
 use sql_support::SqlInterruptScope;
 use sql_support::{self, ConnExt};
@@ -21,13 +21,13 @@ use sync_guid::Guid;
 
 // The sync engine.
 pub struct LoginsSyncEngine<'a> {
-    // Note that once uniffi'd, these lifetimes will go and it will be an Arc<PasswordStore>
-    pub store: &'a PasswordStore,
+    // Note that once uniffi'd, these lifetimes will go and it will be an Arc<LoginStore>
+    pub store: &'a LoginStore,
     pub scope: sql_support::SqlInterruptScope,
 }
 
 impl<'a> LoginsSyncEngine<'a> {
-    pub fn new(store: &'a PasswordStore) -> Self {
+    pub fn new(store: &'a LoginStore) -> Self {
         let scope = store.db.begin_interrupt_scope();
         Self { store, scope }
     }
@@ -72,8 +72,8 @@ impl<'a> LoginsSyncEngine<'a> {
                     if let Some(dupe) = self.store.db.find_dupe(&upstream)? {
                         log::debug!(
                             "  Incoming record {} was is a dupe of local record {}",
-                            upstream.guid,
-                            dupe.guid
+                            upstream.guid(),
+                            dupe.guid()
                         );
                         plan.plan_two_way_merge(&dupe, (upstream, upstream_time));
                     } else {
@@ -405,10 +405,10 @@ impl<'a> SyncEngine for LoginsSyncEngine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::PasswordStore;
+    use crate::store::LoginStore;
     #[test]
     fn test_bad_record() {
-        let store = PasswordStore::new_in_memory(Some("testing")).unwrap();
+        let store = LoginStore::new_in_memory(Some("testing")).unwrap();
         let engine = LoginsSyncEngine::new(&store);
         let scope = store.db.begin_interrupt_scope();
         let mut telem = sync15::telemetry::EngineIncoming::new();

@@ -11,14 +11,14 @@ use sync15::{sync_multiple, telemetry, KeyBundle, MemoryCachedState, Sync15Stora
 
 // This store is a bundle of state to manage the login DB and to help the
 // SyncEngine.
-pub struct PasswordStore {
+pub struct LoginStore {
     pub db: LoginDb,
     pub mem_cached_state: Cell<MemoryCachedState>,
 }
 
-impl PasswordStore {
-    pub fn new(path: impl AsRef<Path>, encryption_key: Option<&str>) -> Result<Self> {
-        let db = LoginDb::open(path, encryption_key)?;
+impl LoginStore {
+    pub fn new(path: impl AsRef<Path>, encryption_key: &str) -> Result<Self> {
+        let db = LoginDb::open(path, Some(encryption_key))?;
         Ok(Self {
             db,
             mem_cached_state: Cell::default(),
@@ -93,11 +93,11 @@ impl PasswordStore {
 
     pub fn add(&self, login: Login) -> Result<String> {
         // Just return the record's ID (which we may have generated).
-        self.db.add(login).map(|record| record.guid.into_string())
+        self.db.add(login).map(|record| record.guid().into_string())
     }
 
-    pub fn import_multiple(&self, logins: &[Login]) -> Result<MigrationMetrics> {
-        self.db.import_multiple(logins)
+    pub fn import_multiple(&self, logins: Vec<Login>) -> Result<MigrationMetrics> {
+        self.db.import_multiple(&logins)
     }
 
     pub fn disable_mem_security(&self) -> Result<()> {
@@ -152,6 +152,12 @@ impl PasswordStore {
         }
     }
 
+    // This is basically exposed just for sync_pass_sql, but it doesn't seem
+    // unreasonable.
+    pub fn conn(&self) -> &rusqlite::Connection {
+        &self.db.db
+    }
+
     pub fn check_valid_with_no_dupes(&self, login: &Login) -> Result<()> {
         self.db.check_valid_with_no_dupes(login)
     }
@@ -162,11 +168,11 @@ mod test {
     use super::*;
     use crate::util;
     use more_asserts::*;
+    use std::cmp::Reverse;
     use std::time::SystemTime;
-    use sync_guid::Guid;
     // Doesn't check metadata fields
     fn assert_logins_equiv(a: &Login, b: &Login) {
-        assert_eq!(b.guid, a.guid);
+        assert_eq!(b.guid(), a.guid());
         assert_eq!(b.hostname, a.hostname);
         assert_eq!(b.form_submit_url, a.form_submit_url);
         assert_eq!(b.http_realm, a.http_realm);
@@ -178,13 +184,13 @@ mod test {
 
     #[test]
     fn test_general() {
-        let store = PasswordStore::new_in_memory(Some("secret")).unwrap();
+        let store = LoginStore::new_in_memory(Some("secret")).unwrap();
         let list = store.list().expect("Grabbing Empty list to work");
         assert_eq!(list.len(), 0);
         let start_us = util::system_time_ms_i64(SystemTime::now());
 
         let a = Login {
-            guid: "aaaaaaaaaaaa".into(),
+            id: "aaaaaaaaaaaa".into(),
             hostname: "https://www.example.com".into(),
             form_submit_url: Some("https://www.example.com".into()),
             username: "coolperson21".into(),
@@ -202,13 +208,12 @@ mod test {
             password: "fdsa".into(),
             ..Login::default()
         };
-
         let a_id = store.add(a.clone()).expect("added a");
         let b_id = store.add(b.clone()).expect("added b");
 
-        assert_eq!(a_id, a.guid);
+        assert_eq!(a_id, a.guid());
 
-        assert_ne!(b_id, b.guid, "Should generate guid when none provided");
+        assert_ne!(b_id, b.guid(), "Should generate guid when none provided");
 
         let a_from_db = store
             .get(&a_id)
@@ -229,7 +234,7 @@ mod test {
         assert_logins_equiv(
             &b_from_db,
             &Login {
-                guid: Guid::from(b_id.as_str()),
+                id: b_id.to_string(),
                 ..b.clone()
             },
         );
@@ -243,8 +248,8 @@ mod test {
 
         let mut expect = vec![a_from_db, b_from_db.clone()];
 
-        list.sort_by(|a, b| b.guid.cmp(&a.guid));
-        expect.sort_by(|a, b| b.guid.cmp(&a.guid));
+        list.sort_by_key(|b| Reverse(b.guid()));
+        expect.sort_by_key(|b| Reverse(b.guid()));
         assert_eq!(list, expect);
 
         store.delete(&a_id).expect("Successful delete");
@@ -271,7 +276,7 @@ mod test {
         let now_us = util::system_time_ms_i64(SystemTime::now());
         let b2 = Login {
             password: "newpass".into(),
-            guid: Guid::from(b_id.as_str()),
+            id: b_id.to_string(),
             ..b
         };
 
@@ -293,7 +298,7 @@ mod test {
 
     #[test]
     fn test_rekey() {
-        let store = PasswordStore::new_in_memory(Some("secret")).unwrap();
+        let store = LoginStore::new_in_memory(Some("secret")).unwrap();
         store.rekey_database("new_encryption_key").unwrap();
         let list = store.list().expect("Grabbing Empty list to work");
         assert_eq!(list.len(), 0);
@@ -303,5 +308,5 @@ mod test {
 #[test]
 fn test_send() {
     fn ensure_send<T: Send>() {}
-    ensure_send::<PasswordStore>();
+    ensure_send::<LoginStore>();
 }
