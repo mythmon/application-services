@@ -8,10 +8,7 @@ use crate::LoginsSyncEngine;
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
-use sync15::{
-    sync_multiple, telemetry, EngineSyncAssociation, KeyBundle,
-    Sync15StorageClientInit,
-};
+use sync15::{sync_multiple, telemetry, EngineSyncAssociation, KeyBundle, Sync15StorageClientInit};
 
 // Our "sync manager" will use whatever is stashed here.
 lazy_static::lazy_static! {
