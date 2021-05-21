@@ -8,10 +8,10 @@ import UIKit
 typealias LoginsStoreError = LoginsStorageError
 
 /*
-** We probably should have this class go away eventually as it's really only a thin wrapper
-* similar to its kotlin equiavlent, however the only thing preventing this from being removed is
-* the queue.sync which we should be moved over to the consumer side of things
-*/
+ ** We probably should have this class go away eventually as it's really only a thin wrapper
+ * similar to its kotlin equiavlent, however the only thing preventing this from being removed is
+ * the queue.sync which we should be moved over to the consumer side of things
+ */
 open class LoginsStorage {
     private var store: LoginStore?
     let dbPath: String
@@ -51,10 +51,10 @@ open class LoginsStorage {
     // helper to reduce boilerplate, we don't use queue.sync
     // since we expect the caller to do so.
     private func getUnlockedStore() throws -> LoginStore {
-        if self.store == nil {
+        if store == nil {
             throw LoginsStoreError.MismatchedLock(message: "Mismatched Lock")
         }
-        return self.store!
+        return store!
     }
 
     /// Unlock the database and reads the salt.
@@ -90,15 +90,15 @@ open class LoginsStorage {
     }
 
     private func doOpen(_ key: String, salt: String?) throws {
-        if self.store != nil {
+        if store != nil {
             return
         }
         if let salt = salt {
-            self.store = try LoginStore.newWithSalt(path: self.dbPath, encryptionKey: key, salt: salt)
+            store = try LoginStore.newWithSalt(path: dbPath, encryptionKey: key, salt: salt)
         } else {
-            self.store = try LoginStore(path: self.dbPath, encryptionKey: key)
-            }
+            store = try LoginStore(path: dbPath, encryptionKey: key)
         }
+    }
 
     /// Unlock the database.
     /// `key` must be a random string.
@@ -171,7 +171,7 @@ open class LoginsStorage {
 
     /// Synchronize with the server. Returns the sync telemetry "ping" as a JSON
     /// string.
-    open func sync(unlockInfo: SyncUnlockInfo) throws -> String {
+    open func sync(unlockInfo _: SyncUnlockInfo) throws -> String {
         // TODO: Need to conver sync
 //        return try queue.sync {
 //            let engine = try self.getUnlocked()
@@ -289,6 +289,6 @@ open class LoginsStorage {
     open func getByBaseDomain(baseDomain: String) throws -> [Login] {
         return try queue.sync {
             return try self.getUnlockedStore().getByBaseDomain(baseDomain: baseDomain)
-            }
         }
+    }
 }

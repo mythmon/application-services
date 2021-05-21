@@ -181,7 +181,7 @@ fn show_all(store: &LoginStore) -> Result<Vec<String>> {
 
     let mut v = Vec::with_capacity(records.len());
     let mut record_copy = records.clone();
-    record_copy.sort_by(|a, b| a.guid().cmp(&b.guid()));
+    record_copy.sort_by_key(|a| a.guid());
     for rec in records.iter() {
         table.add_row(row![
             r->v.len(),
@@ -293,7 +293,7 @@ fn main() -> Result<()> {
             'A' | 'a' => {
                 log::info!("Adding new record");
                 let record = read_login();
-                if let Err(e) = store.add(record.into()) {
+                if let Err(e) = store.add(record) {
                     log::warn!("Failed to create record! {}", e);
                 }
             }
@@ -329,7 +329,7 @@ fn main() -> Result<()> {
                                 continue;
                             }
                         };
-                        update_login(&mut login_record.clone().into());
+                        update_login(&mut login_record.clone());
                         if let Err(e) = store.update(login_record) {
                             log::warn!("Failed to update record! {}", e);
                         }
