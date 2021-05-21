@@ -8,7 +8,10 @@ use crate::LoginsSyncEngine;
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
-use sync15::{sync_multiple, telemetry, KeyBundle, Sync15StorageClientInit};
+use sync15::{
+    sync_multiple, telemetry, EngineSyncAssociation, KeyBundle,
+    Sync15StorageClientInit,
+};
 
 // Our "sync manager" will use whatever is stashed here.
 lazy_static::lazy_static! {
@@ -80,12 +83,22 @@ impl LoginStore {
         }
     }
 
-    // This also needs our Arc<>
+    // This needs our Arc<>
     pub fn register_with_sync_manager(&self) {
         STORE_FOR_MANAGER
             .lock()
             .unwrap()
             .replace(Arc::downgrade(&self.store_impl.clone()));
+    }
+
+    // This needs our Arc<>
+    pub fn reset(&self) -> Result<()> {
+        // Reset should not exist here - all resets should be done via the
+        // sync manager. It seems that actual consumers don't use this, but
+        // some tests do, so it remains for now.
+        let engine = LoginsSyncEngine::new(Arc::clone(&self.store_impl));
+        engine.do_reset(&EngineSyncAssociation::Disconnected)?;
+        Ok(())
     }
 
     // Everything below here is a simple delegate to the impl.
@@ -137,10 +150,6 @@ impl LoginStore {
 
     pub fn wipe_local(&self) -> Result<()> {
         self.store_impl.wipe_local()
-    }
-
-    pub fn reset(&self) -> Result<()> {
-        self.store_impl.reset()
     }
 
     pub fn update(&self, login: Login) -> Result<()> {
@@ -238,12 +247,6 @@ impl LoginStoreImpl {
     pub fn wipe_local(&self) -> Result<()> {
         self.db.lock().unwrap().wipe_local()?;
         Ok(())
-    }
-
-    pub fn reset(&self) -> Result<()> {
-        // This was exposed but is not used - consumers should be resetting
-        // via the sync manager.
-        unreachable!();
     }
 
     pub fn update(&self, login: Login) -> Result<()> {
