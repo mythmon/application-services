@@ -11,6 +11,7 @@ use cli_support::prompt::{prompt_char, prompt_string, prompt_usize};
 use logins::{Login, LoginStore, LoginsSyncEngine};
 use prettytable::{cell, row, Cell, Row, Table};
 use rusqlite::NO_PARAMS;
+use std::sync::Arc;
 use sync15::{EngineSyncAssociation, SyncEngine};
 use sync_guid::Guid;
 
@@ -117,9 +118,8 @@ fn timestamp_to_string(milliseconds: i64) -> String {
     dtl.format("%l:%M:%S %p%n%h %e, %Y").to_string()
 }
 
-fn show_sql(s: &LoginStore, sql: &str) -> Result<()> {
+fn show_sql(conn: &rusqlite::Connection, sql: &str) -> Result<()> {
     use rusqlite::types::Value;
-    let conn = &s.db;
     let mut stmt = conn.prepare(sql)?;
     let cols: Vec<String> = stmt
         .column_names()
@@ -339,7 +339,7 @@ fn main() -> Result<()> {
             }
             'R' | 'r' => {
                 log::info!("Resetting client.");
-                let engine = LoginsSyncEngine::new(&store);
+                let engine = LoginsSyncEngine::new(Arc::clone(&store.store_impl));
                 if let Err(e) = engine.reset(&EngineSyncAssociation::Disconnected) {
                     log::warn!("Failed to reset! {}", e);
                 }
@@ -399,7 +399,8 @@ fn main() -> Result<()> {
             'x' | 'X' => {
                 log::info!("Running arbitrary SQL, there's no way this could go wrong!");
                 if let Some(sql) = prompt_string("SQL (one line only, press enter when done):\n") {
-                    if let Err(e) = show_sql(&store, &sql) {
+                    let db = store.store_impl.db.lock().unwrap();
+                    if let Err(e) = show_sql(&db, &sql) {
                         log::warn!("Failed to run sql query: {}", e);
                     }
                 }

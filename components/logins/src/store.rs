@@ -5,126 +5,54 @@ use crate::db::{LoginDb, MigrationMetrics};
 use crate::error::*;
 use crate::login::Login;
 use crate::LoginsSyncEngine;
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::path::Path;
-use sync15::{sync_multiple, telemetry, KeyBundle, MemoryCachedState, Sync15StorageClientInit};
+use std::sync::{Arc, Mutex, Weak};
+use sync15::{sync_multiple, telemetry, KeyBundle, Sync15StorageClientInit};
 
-// This store is a bundle of state to manage the login DB and to help the
-// SyncEngine.
+// Our "sync manager" will use whatever is stashed here.
+lazy_static::lazy_static! {
+    // Mutex: just taken long enough to update the inner stuff - needed
+    //        to wrap the RefCell as they aren't `Sync`
+    // RefCell: So we can replace what it holds. Normally you'd use `get_ref()`
+    //          on the mutex and avoid the RefCell entirely, but that requires
+    //          the mutex to be declared as `mut` which is apparently
+    //          impossible in a `lazy_static`
+    // <[Arc/Weak]<LoginStoreImpl>>: What the sync manager actually needs.
+    pub static ref STORE_FOR_MANAGER: Mutex<RefCell<Weak<LoginStoreImpl>>> = Mutex::new(RefCell::new(Weak::new()));
+}
+
+// This is the type that uniffi exposes. It holds an `Arc<>` around the
+// actual implementation, because we need to hand a clone of this `Arc<>` to
+// the sync manager and to sync engines. One day
+// https://github.com/mozilla/uniffi-rs/issues/417 will give us access to the
+// `Arc<>` uniffi owns, which means we can drop this entirely (ie, `Store` and
+// `StoreImpl` could be re-unified)
 pub struct LoginStore {
-    pub db: LoginDb,
-    pub mem_cached_state: Cell<MemoryCachedState>,
+    pub store_impl: Arc<LoginStoreImpl>,
 }
 
 impl LoginStore {
-    pub fn new(path: impl AsRef<Path>, encryption_key: &str) -> Result<Self> {
-        let db = LoginDb::open(path, Some(encryption_key))?;
-        Ok(Self {
-            db,
-            mem_cached_state: Cell::default(),
-        })
-    }
-
-    pub fn new_with_salt(path: impl AsRef<Path>, encryption_key: &str, salt: &str) -> Result<Self> {
-        let db = LoginDb::open_with_salt(path, encryption_key, salt)?;
-        Ok(Self {
-            db,
-            mem_cached_state: Cell::default(),
-        })
-    }
-
-    pub fn new_in_memory(encryption_key: Option<&str>) -> Result<Self> {
-        let db = LoginDb::open_in_memory(encryption_key)?;
-        Ok(Self {
-            db,
-            mem_cached_state: Cell::default(),
-        })
-    }
-
-    pub fn list(&self) -> Result<Vec<Login>> {
-        self.db.get_all()
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<Login>> {
-        self.db.get_by_id(id)
-    }
-
-    pub fn get_by_base_domain(&self, base_domain: &str) -> Result<Vec<Login>> {
-        self.db.get_by_base_domain(base_domain)
-    }
-
-    pub fn potential_dupes_ignoring_username(&self, login: Login) -> Result<Vec<Login>> {
-        self.db.potential_dupes_ignoring_username(&login)
-    }
-
-    pub fn touch(&self, id: &str) -> Result<()> {
-        self.db.touch(id)
-    }
-
-    pub fn delete(&self, id: &str) -> Result<bool> {
-        self.db.delete(id)
-    }
-
-    pub fn wipe(&self) -> Result<()> {
-        // This should not be exposed - it wipes the server too and there's
-        // no good reason to expose that to consumers. wipe_local makes some
-        // sense though.
-        // TODO: this is exposed to android-components consumers - we should
-        // check if anyone actually calls it.
-        let scope = self.db.begin_interrupt_scope();
-        self.db.wipe(&scope)?;
-        Ok(())
-    }
-
-    pub fn wipe_local(&self) -> Result<()> {
-        self.db.wipe_local()?;
-        Ok(())
-    }
-
-    pub fn reset(&self) -> Result<()> {
-        // This was exposed but is not used - consumers should be resetting
-        // via the sync manager.
-        unreachable!();
-    }
-
-    pub fn update(&self, login: Login) -> Result<()> {
-        self.db.update(login)
-    }
-
-    pub fn add(&self, login: Login) -> Result<String> {
-        // Just return the record's ID (which we may have generated).
-        self.db.add(login).map(|record| record.guid().into_string())
-    }
-
-    pub fn import_multiple(&self, logins: Vec<Login>) -> Result<MigrationMetrics> {
-        self.db.import_multiple(&logins)
-    }
-
-    pub fn disable_mem_security(&self) -> Result<()> {
-        self.db.disable_mem_security()
-    }
-
-    pub fn rekey_database(&self, new_encryption_key: &str) -> Result<()> {
-        self.db.rekey_database(new_encryption_key)
-    }
-
-    pub fn new_interrupt_handle(&self) -> sql_support::SqlInterruptHandle {
-        self.db.new_interrupt_handle()
-    }
+    // First up we have the (few) things that want access to our `Arc<>`
 
     /// A convenience wrapper around sync_multiple.
     // This can almost die later - consumers should never call it (they should
     // use the sync manager) and any of our examples probably can too!
-    // Once this dies, `mem_cached_state` can die too.
     pub fn sync(
         &self,
         storage_init: &Sync15StorageClientInit,
         root_sync_key: &KeyBundle,
     ) -> Result<telemetry::SyncTelemetryPing> {
-        let engine = LoginsSyncEngine::new(&self);
+        let engine = LoginsSyncEngine::new(Arc::clone(&self.store_impl));
 
         let mut disk_cached_state = engine.get_global_state()?;
-        let mut mem_cached_state = self.mem_cached_state.take();
+        // Because `sync` should not be used in practice, and because
+        // `mem_cached_state` can be considered an optimization (in that it
+        // allows subsequent syncs to do less work) we just discard this state,
+        // so every sync acts like it's the first one the process has done.
+        // (disk_cached_state is far more important - but even in this context
+        // it probably doesn't matter, but it's not getting in our way yet)
+        let mut mem_cached_state = Default::default();
 
         let mut result = sync_multiple(
             &[&engine],
@@ -152,14 +80,203 @@ impl LoginStore {
         }
     }
 
-    // This is basically exposed just for sync_pass_sql, but it doesn't seem
-    // unreasonable.
-    pub fn conn(&self) -> &rusqlite::Connection {
-        &self.db.db
+    // This also needs our Arc<>
+    pub fn register_with_sync_manager(&self) {
+        STORE_FOR_MANAGER
+            .lock()
+            .unwrap()
+            .replace(Arc::downgrade(&self.store_impl.clone()));
+    }
+
+    // Everything below here is a simple delegate to the impl.
+    pub fn new(path: impl AsRef<Path>, encryption_key: &str) -> Result<Self> {
+        Ok(Self {
+            store_impl: Arc::new(LoginStoreImpl::new(path, encryption_key)?),
+        })
+    }
+
+    pub fn new_with_salt(path: impl AsRef<Path>, encryption_key: &str, salt: &str) -> Result<Self> {
+        Ok(Self {
+            store_impl: Arc::new(LoginStoreImpl::new_with_salt(path, encryption_key, salt)?),
+        })
+    }
+
+    pub fn new_in_memory(encryption_key: Option<&str>) -> Result<Self> {
+        Ok(Self {
+            store_impl: Arc::new(LoginStoreImpl::new_in_memory(encryption_key)?),
+        })
+    }
+
+    pub fn list(&self) -> Result<Vec<Login>> {
+        self.store_impl.list()
+    }
+
+    pub fn get(&self, id: &str) -> Result<Option<Login>> {
+        self.store_impl.get(id)
+    }
+
+    pub fn get_by_base_domain(&self, base_domain: &str) -> Result<Vec<Login>> {
+        self.store_impl.get_by_base_domain(base_domain)
+    }
+
+    pub fn potential_dupes_ignoring_username(&self, login: Login) -> Result<Vec<Login>> {
+        self.store_impl.potential_dupes_ignoring_username(login)
+    }
+
+    pub fn touch(&self, id: &str) -> Result<()> {
+        self.store_impl.touch(id)
+    }
+
+    pub fn delete(&self, id: &str) -> Result<bool> {
+        self.store_impl.delete(id)
+    }
+
+    pub fn wipe(&self) -> Result<()> {
+        self.store_impl.wipe()
+    }
+
+    pub fn wipe_local(&self) -> Result<()> {
+        self.store_impl.wipe_local()
+    }
+
+    pub fn reset(&self) -> Result<()> {
+        self.store_impl.reset()
+    }
+
+    pub fn update(&self, login: Login) -> Result<()> {
+        self.store_impl.update(login)
+    }
+
+    pub fn add(&self, login: Login) -> Result<String> {
+        self.store_impl.add(login)
+    }
+
+    pub fn import_multiple(&self, logins: Vec<Login>) -> Result<MigrationMetrics> {
+        self.store_impl.import_multiple(logins)
+    }
+
+    pub fn disable_mem_security(&self) -> Result<()> {
+        self.store_impl.disable_mem_security()
+    }
+
+    pub fn new_interrupt_handle(&self) -> sql_support::SqlInterruptHandle {
+        self.store_impl.new_interrupt_handle()
+    }
+
+    pub fn rekey_database(&self, new_encryption_key: &str) -> Result<()> {
+        self.store_impl.rekey_database(new_encryption_key)
     }
 
     pub fn check_valid_with_no_dupes(&self, login: &Login) -> Result<()> {
-        self.db.check_valid_with_no_dupes(login)
+        self.store_impl.check_valid_with_no_dupes(login)
+    }
+}
+
+// The actual store implementation.
+// This store is a bundle of state to manage the login DB and to help the
+// SyncEngine.
+// This will go away once uniffi gives us access to its `Arc<>`
+pub struct LoginStoreImpl {
+    pub db: Mutex<LoginDb>,
+}
+
+impl LoginStoreImpl {
+    pub fn new(path: impl AsRef<Path>, encryption_key: &str) -> Result<Self> {
+        let db = Mutex::new(LoginDb::open(path, Some(encryption_key))?);
+        Ok(Self { db })
+    }
+
+    pub fn new_with_salt(path: impl AsRef<Path>, encryption_key: &str, salt: &str) -> Result<Self> {
+        let db = Mutex::new(LoginDb::open_with_salt(path, encryption_key, salt)?);
+        Ok(Self { db })
+    }
+
+    pub fn new_in_memory(encryption_key: Option<&str>) -> Result<Self> {
+        let db = Mutex::new(LoginDb::open_in_memory(encryption_key)?);
+        Ok(Self { db })
+    }
+
+    pub fn list(&self) -> Result<Vec<Login>> {
+        self.db.lock().unwrap().get_all()
+    }
+
+    pub fn get(&self, id: &str) -> Result<Option<Login>> {
+        self.db.lock().unwrap().get_by_id(id)
+    }
+
+    pub fn get_by_base_domain(&self, base_domain: &str) -> Result<Vec<Login>> {
+        self.db.lock().unwrap().get_by_base_domain(base_domain)
+    }
+
+    pub fn potential_dupes_ignoring_username(&self, login: Login) -> Result<Vec<Login>> {
+        self.db
+            .lock()
+            .unwrap()
+            .potential_dupes_ignoring_username(&login)
+    }
+
+    pub fn touch(&self, id: &str) -> Result<()> {
+        self.db.lock().unwrap().touch(id)
+    }
+
+    pub fn delete(&self, id: &str) -> Result<bool> {
+        self.db.lock().unwrap().delete(id)
+    }
+
+    pub fn wipe(&self) -> Result<()> {
+        // This should not be exposed - it wipes the server too and there's
+        // no good reason to expose that to consumers. wipe_local makes some
+        // sense though.
+        // TODO: this is exposed to android-components consumers - we should
+        // check if anyone actually calls it.
+        let db = self.db.lock().unwrap();
+        let scope = db.begin_interrupt_scope();
+        db.wipe(&scope)?;
+        Ok(())
+    }
+
+    pub fn wipe_local(&self) -> Result<()> {
+        self.db.lock().unwrap().wipe_local()?;
+        Ok(())
+    }
+
+    pub fn reset(&self) -> Result<()> {
+        // This was exposed but is not used - consumers should be resetting
+        // via the sync manager.
+        unreachable!();
+    }
+
+    pub fn update(&self, login: Login) -> Result<()> {
+        self.db.lock().unwrap().update(login)
+    }
+
+    pub fn add(&self, login: Login) -> Result<String> {
+        // Just return the record's ID (which we may have generated).
+        self.db
+            .lock()
+            .unwrap()
+            .add(login)
+            .map(|record| record.guid().into_string())
+    }
+
+    pub fn import_multiple(&self, logins: Vec<Login>) -> Result<MigrationMetrics> {
+        self.db.lock().unwrap().import_multiple(&logins)
+    }
+
+    pub fn disable_mem_security(&self) -> Result<()> {
+        self.db.lock().unwrap().disable_mem_security()
+    }
+
+    pub fn new_interrupt_handle(&self) -> sql_support::SqlInterruptHandle {
+        self.db.lock().unwrap().new_interrupt_handle()
+    }
+
+    pub fn rekey_database(&self, new_encryption_key: &str) -> Result<()> {
+        self.db.lock().unwrap().rekey_database(new_encryption_key)
+    }
+
+    pub fn check_valid_with_no_dupes(&self, login: &Login) -> Result<()> {
+        self.db.lock().unwrap().check_valid_with_no_dupes(&login)
     }
 }
 
